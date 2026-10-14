@@ -241,7 +241,9 @@ function subtitleTracks(list) {
       const code = String(s.lang || "").toLowerCase();
       if (code !== lang || !s.url || String(s.url).length > 2000 || taken.has(s.url)) continue;
       taken.add(s.url);
-      out.push({ lang, url: s.url, format: s.format === "srt" ? "srt" : "vtt" });
+      // The API labels OpenSubtitles files "vtt" but serves SubRip (checked on real answers): trust the source, not the label.
+      const srt = s.format === "srt" || s.source === "opensubtitles" || /\.srt(\?|$)/i.test(s.url);
+      out.push({ lang, url: s.url, format: srt ? "srt" : "vtt" });
       if (out.filter((x) => x.lang === lang).length >= 3) break;
     }
   }

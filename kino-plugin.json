@@ -1,7 +1,7 @@
 {
   "id": "framextv",
   "name": "Frame",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "apiVersion": 4,
   "entry": "plugin.js",
   "description": "Películas, series y anime con subtítulos en español, desde frameXTV. El audio suele venir en inglés.",

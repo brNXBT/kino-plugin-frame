@@ -130,6 +130,8 @@ test("resolve a movie: best copy first, Spanish subtitles first, other copies as
   assert.match(s.url, /^https:\/\/api\.framextv\.tech\/api\/proxy\?url=/);
   assert.equal(s.mime, "video/mp4");
   assert.equal(s.subtitles[0].lang, "es");
+  // OpenSubtitles files are SubRip even though the API says "vtt".
+  assert.ok(s.subtitles.every((x) => x.format === "srt"));
   assert.ok(s.alternatives.length >= 1);
 });
 
