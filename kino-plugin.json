@@ -1,0 +1,25 @@
+{
+  "id": "framextv",
+  "name": "Frame",
+  "version": "1.0.0",
+  "apiVersion": 4,
+  "entry": "plugin.js",
+  "description": "Películas, series y anime con subtítulos en español, desde frameXTV. El audio suele venir en inglés.",
+  "author": "brNXBT",
+  "homepage": "https://github.com/brNXBT/kino-plugin-frame",
+  "hosts": [
+    "api.framextv.tech",
+    "image.tmdb.org"
+  ],
+  "streamHosts": "any",
+  "capabilities": [
+    "search",
+    "home",
+    "browse",
+    "episodes",
+    "resolve"
+  ],
+  "categories": ["movies", "series", "anime"],
+  "color": "#E5484D",
+  "icon": "icon.png"
+}
