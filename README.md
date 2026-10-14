@@ -2,6 +2,8 @@
 
 Películas, series y anime desde frameXTV, con subtítulos en español. El audio suele venir en inglés.
 
+Ofrece los mismos servidores que la página (Super Barbarian, Headhunter, Bowler, Miner, Valkyrie, Hog Rider, Lava Hound y Backup), otras copias del video y todos los idiomas de subtítulos que entrega frameXTV. Algunos servidores fallan según el día: prueba otro desde el menú de servidores.
+
 - **Catálogo:** TMDB, a través de `kino.tmdb` (necesita Kino 0.9.53 o más nuevo; no lleva ninguna llave).
 - **Video:** el servidor de frameXTV (`api.framextv.tech`), que responde por el número de TMDB. Los videos salen de servidores que cambian, por eso el plugin pide permiso para reproducir desde cualquier servidor (`streamHosts: "any"`).
 - **No pide ajustes, usuario ni contraseña.**

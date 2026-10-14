@@ -167,10 +167,12 @@ export async function search(query) {
 // ---- Seasons and episodes -----------------------------------------------------------------------------------------------
 const APPEND_LIMIT = 19; // TMDB appends at most 20 sub-requests to one call
 
+// A ref is "movie:<tmdb>", "tv:<tmdb>" (a series) or "tv:<tmdb>:<season>:<episode>", plus an optional "@<server>" that asks
+// frameXTV for that server only (see SERVERS).
 function parseRef(ref) {
-  const m = /^(movie|tv):(\d{1,9})(?::(\d{1,3}):(\d{1,5}))?$/.exec(String(ref || ""));
+  const m = /^(movie|tv):(\d{1,9})(?::(\d{1,3}):(\d{1,5}))?(?:@([a-z_]{2,20}))?$/.exec(String(ref || ""));
   if (!m) return null;
-  return { type: m[1], id: Number(m[2]), season: m[3] ? Number(m[3]) : null, episode: m[4] ? Number(m[4]) : null };
+  return { type: m[1], id: Number(m[2]), season: m[3] ? Number(m[3]) : null, episode: m[4] ? Number(m[4]) : null, server: m[5] || null };
 }
 
 export async function episodes(ref) {
@@ -217,8 +219,36 @@ export async function episodes(ref) {
 }
 
 // ---- Video --------------------------------------------------------------------------------------------------------------
-// A response is { success, provider, sources: [{ url, quality, type: "mp4"|"hls", server, skipProxy? }], subtitles: [...] }.
+// A response is { success, provider, sources: [{ url, quality, type: "mp4"|"hls", server, headers? }], subtitles: [...] }.
 // Some sources already point at /api/proxy on the API host; the rest sit on CDNs of every kind.
+//
+// frameXTV's own site offers eight servers. Asking the API with &provider=<id> returns that server's answer alone; without it
+// the API picks one. resolve() plays the one asked (or the one the API picked) and lists the other servers as lazy copies
+// { label, ref }, which Kino (and brntv) resolve only when the person picks that server.
+const SERVERS = [
+  { id: "super_barbarian", name: "Super Barbarian XVI", tag: "4K" },
+  { id: "headhunter", name: "Headhunter XXXI", tag: "FHD" },
+  { id: "bowler", name: "Bowler XVIII", tag: "FHD", multi: true },
+  { id: "miner", name: "Miner XIX", tag: "4K" },
+  { id: "valkyrie", name: "Valkyrie VI", tag: "4K" },
+  { id: "hog_rider", name: "Hog Rider XI", tag: "4K" },
+  { id: "lava_hound", name: "Lava Hound XII", tag: "4K" },
+  { id: "backup", name: "Backup", tag: "" },
+];
+const SERVER_BY_ID = {};
+for (const sv of SERVERS) SERVER_BY_ID[sv.id] = sv;
+
+function clip(text, max) {
+  const x = String(text || "");
+  return x.length > max ? x.slice(0, max - 1) + "…" : x;
+}
+
+// "Bowler XVIII · FHD · Multi-idioma": the name, then what the server is known for (the menu shows the rest as chips).
+function serverLabel(sv) {
+  const tags = [sv.tag, sv.multi ? t("Multi-idioma", "Multi-language") : ""].filter(Boolean);
+  return clip([sv.name].concat(tags).join(" · "), 48);
+}
+
 function qualityRank(s) {
   const q = String(s.quality || "");
   const n = /(\d{3,4})p/.exec(q);
@@ -226,36 +256,112 @@ function qualityRank(s) {
   return n ? Number(n[1]) : 0;
 }
 
-function toStream(s) {
-  const hls = s.type === "hls" || /\.m3u8(\?|$)/i.test(s.url);
-  return { url: s.url, mime: hls ? HLS_MIME : "video/mp4", label: [s.server, s.quality].filter(Boolean).join(" · ").slice(0, 48) || undefined };
+// "4K" or "1080p" when the source says it, else "".
+function resolutionLabel(s) {
+  const q = String(s.quality || "");
+  if (/4k/i.test(q)) return "4K";
+  const all = q.match(/\d{3,4}p/g);
+  return all ? all.sort((a, b) => parseInt(b, 10) - parseInt(a, 10))[0] : "";
 }
 
-// Subtitles: the person's language first, then English; at most 6 tracks, none with an overlong address.
-function subtitleTracks(list) {
-  const want = english() ? ["en", "es"] : ["es", "en"];
-  const out = [];
-  const taken = new Set();
-  for (const lang of want) {
-    for (const s of list || []) {
-      const code = String(s.lang || "").toLowerCase();
-      if (code !== lang || !s.url || String(s.url).length > 2000 || taken.has(s.url)) continue;
-      taken.add(s.url);
-      // The API labels OpenSubtitles files "vtt" but serves SubRip (checked on real answers): trust the source, not the label.
-      const srt = s.format === "srt" || s.source === "opensubtitles" || /\.srt(\?|$)/i.test(s.url);
-      out.push({ lang, url: s.url, format: srt ? "srt" : "vtt" });
-      if (out.filter((x) => x.lang === lang).length >= 3) break;
-    }
+function isHls(s) {
+  return s.type === "hls" || /\.m3u8(\?|$)/i.test(s.url);
+}
+
+// The copies that play the original audio: Bowler also lists dubs ("1080p | Hindi"), which are other languages, not other copies.
+function sameLanguage(list) {
+  const original = list.filter((s) => !/\|\s*(?!english|inglés|ingles)\S/i.test(String(s.quality || "")));
+  return original.length ? original : list;
+}
+
+function plainHeaders(h) {
+  if (!h || typeof h !== "object") return undefined;
+  const out = {};
+  let n = 0;
+  for (const k of Object.keys(h)) {
+    if (n >= 20 || typeof h[k] !== "string" || /^(host|content-length|cookie)$/i.test(k)) continue;
+    out[k] = h[k];
+    n++;
   }
-  return out.slice(0, 6);
+  return n ? out : undefined;
+}
+
+function streamOf(s, label) {
+  const out = { url: s.url, mime: isHls(s) ? HLS_MIME : "video/mp4", label: clip(label, 48) };
+  const headers = plainHeaders(s.headers);
+  if (headers) out.headers = headers;
+  return out;
+}
+
+// Language names the API gives instead of a code (its own, "native" subtitles), written in their own script.
+const LANG_NAMES = {
+  english: "en", español: "es", espanol: "es", français: "fr", francais: "fr", deutsch: "de", italiano: "it", português: "pt",
+  portugues: "pt", indonesian: "id", "bahasa indonesia": "id", filipino: "fil", русский: "ru", українська: "uk", polski: "pl",
+  türkçe: "tr", nederlands: "nl", svenska: "sv", dansk: "da", suomi: "fi", norsk: "no", čeština: "cs", magyar: "hu", română: "ro",
+  ελληνικά: "el", עברית: "he", العربية: "ar", فارسی: "fa", اردو: "ur", বাংলা: "bn", हिन्दी: "hi", தமிழ்: "ta", తెలుగు: "te",
+  ไทย: "th", "tiếng việt": "vi", "bahasa melayu": "ms", 中文: "zh", 日本語: "ja", 한국어: "ko",
+};
+
+function subtitleCode(s) {
+  const code = String(s.lang || "").toLowerCase().trim();
+  if (/^[a-z]{2,3}(-[a-z0-9]{2,8})?$/.test(code)) return code;
+  // Vowel signs are dropped so "اَلْعَرَبِيَّةُ" matches "العربية".
+  const name = String(s.label || s.language || "").toLowerCase().replace(/[\u064B-\u065F\u0670]/g, "").trim();
+  return LANG_NAMES[name] || "";
+}
+
+// Every language the API offers (Kino keeps 30): the person's language first, then English, then the rest by code. At most two
+// files per language, none with an overlong address.
+function subtitleTracks(list) {
+  const first = english() ? ["en", "es"] : ["es", "en"];
+  const found = [];
+  const taken = new Set();
+  const perLang = {};
+  for (const s of list || []) {
+    const code = subtitleCode(s);
+    if (!code || !s.url || String(s.url).length > 2000 || taken.has(s.url)) continue;
+    perLang[code] = (perLang[code] || 0) + 1;
+    if (perLang[code] > 2) continue;
+    taken.add(s.url);
+    // The API labels OpenSubtitles files "vtt" but serves SubRip (checked on real answers): trust the source, not the label.
+    const srt = s.format === "srt" || s.source === "opensubtitles" || /\.srt(\?|$)/i.test(s.url);
+    found.push({ lang: code, url: s.url, format: srt ? "srt" : "vtt" });
+  }
+  const rank = (c) => {
+    const i = first.indexOf(c.split("-")[0]);
+    return i === -1 ? 99 : i;
+  };
+  return found
+    .map((x, i) => ({ x, i }))
+    .sort((a, b) => {
+      const ra = rank(a.x.lang);
+      const rb = rank(b.x.lang);
+      if (ra !== rb) return ra - rb;
+      if (ra === 99 && a.x.lang !== b.x.lang) return a.x.lang < b.x.lang ? -1 : 1;
+      return a.i - b.i;
+    })
+    .map((e) => e.x)
+    .slice(0, 30);
+}
+
+// What the person reads when a server cannot play the title (Kino shows it when it passes its rules: Spanish or English, no URLs).
+function failure(code, detail) {
+  return kino.error(code, detail, {
+    userMessage: t(
+      "Este servidor no tiene el video ahora. Prueba otro desde el menú de servidores.",
+      "This server does not have the video right now. Try another one from the server menu.",
+    ),
+  });
 }
 
 export async function resolve(ref) {
   await null;
   const p = parseRef(ref);
   if (!p || (p.type === "tv" && p.season === null)) throw kino.error("not_found", "ese título ya no existe");
+  if (p.server && !SERVER_BY_ID[p.server]) throw kino.error("not_found", "ese servidor no existe");
   let url = API + "/api/stream?type=" + p.type + "&id=" + p.id;
   if (p.type === "tv") url += "&season=" + p.season + "&episode=" + p.episode;
+  if (p.server) url += "&provider=" + p.server;
   const r = await kino.fetch(url);
   if (!r.ok) throw kino.error(r.status === 429 ? "rate_limited" : "unavailable", "frameXTV respondió " + r.status);
   let data;
@@ -265,15 +371,27 @@ export async function resolve(ref) {
     throw kino.error("unavailable", "frameXTV no devolvió JSON");
   }
   const sources = ((data && data.sources) || []).filter((s) => s && typeof s.url === "string" && /^https?:\/\//.test(s.url));
-  if (!data || !data.success || !sources.length) throw kino.error("not_found", "frameXTV no tiene este título por ahora");
-  // HLS first (it adapts to the connection), then by quality.
-  sources.sort((a, b) => (b.type === "hls") - (a.type === "hls") || qualityRank(b) - qualityRank(a));
-  const [best, ...rest] = sources.map(toStream);
-  const alternatives = rest.slice(0, 8).map(({ url: u, mime, label }) => ({ url: u, mime, label }));
+  if (!data || !data.success || !sources.length) {
+    const why = String((data && data.error) || "");
+    throw failure(/\b429\b|rate/i.test(why) ? "rate_limited" : "not_found", "frameXTV no tiene este título en este servidor");
+  }
+  // The server that answers: the one asked for, else the one the API picked.
+  const used = (p.server && SERVER_BY_ID[p.server]) || SERVER_BY_ID[data.provider] || null;
+  const name = used ? used.name : t("Servidor automático", "Automatic server");
+  // HLS first (it adapts to the connection), then by quality; dubs are left out.
+  const ordered = sameLanguage(sources).sort((a, b) => isHls(b) - isHls(a) || qualityRank(b) - qualityRank(a));
+  const best = ordered[0];
+  const main = streamOf(best, name + " · " + (resolutionLabel(best) || (used && used.tag) || "auto"));
+  // Other copies of this same video on this server (other qualities, other CDNs), then the other servers, lazily: 8 at most.
+  const copies = ordered.slice(1, 4).map((s, i) => streamOf(s, name + " · " + (resolutionLabel(s) || ((/\(([^)]+)\)/.exec(String(s.server || "")) || [])[1]) || t("copia ", "copy ") + (i + 1))));
+  const base = p.type + ":" + p.id + (p.type === "tv" ? ":" + p.season + ":" + p.episode : "");
+  const others = SERVERS.filter((sv) => !used || sv.id !== used.id)
+    .slice(0, 8 - copies.length)
+    .map((sv) => ({ label: serverLabel(sv), ref: base + "@" + sv.id }));
   return {
-    ...best,
+    ...main,
     subtitles: subtitleTracks(data.subtitles),
-    alternatives: alternatives.length ? alternatives : undefined,
+    alternatives: copies.concat(others),
     expiresInSeconds: 1200,
   };
 }

@@ -124,27 +124,70 @@ test("episodes: seasons 1+, specials skipped, refs carry the season and episode"
   await assert.rejects(() => plugin.episodes("movie:1"), (e) => e.code === "not_found");
 });
 
-test("resolve a movie: best copy first, Spanish subtitles first, other copies as alternatives", async () => {
+test("resolve a movie: the server the API picked plays, the others are listed lazily", async () => {
   use();
   const s = await checked("resolve", "movie:603");
-  assert.match(s.url, /^https:\/\/api\.framextv\.tech\/api\/proxy\?url=/);
-  assert.equal(s.mime, "video/mp4");
-  assert.equal(s.subtitles[0].lang, "es");
-  // OpenSubtitles files are SubRip even though the API says "vtt".
-  assert.ok(s.subtitles.every((x) => x.format === "srt"));
-  assert.ok(s.alternatives.length >= 1);
+  assert.equal(s.mime, "application/vnd.apple.mpegurl");
+  assert.match(s.label, /^Headhunter XXXI/);
+  // Every other server is a lazy copy { label, ref } that asks for that server alone; the one playing is not listed again.
+  const lazy = (s.alternatives || []).filter((a) => a.ref);
+  assert.deepEqual(lazy.map((a) => a.ref.split("@")[1]), ["super_barbarian", "bowler", "miner", "valkyrie", "hog_rider", "lava_hound", "backup"]);
+  assert.ok(lazy.every((a) => a.ref.startsWith("movie:603@") && a.label));
+  assert.ok(s.alternatives.length <= 8);
 });
 
-test("resolve an episode: HLS", async () => {
+test("resolve a movie: every subtitle language, the person's first, all SubRip", async () => {
+  use();
+  const s = await checked("resolve", "movie:603");
+  assert.equal(s.subtitles[0].lang, "es");
+  assert.ok(s.subtitles.length > 10 && s.subtitles.length <= 30);
+  const langs = new Set(s.subtitles.map((x) => x.lang));
+  for (const l of ["es", "en", "fr", "pt-br", "ar", "zh"]) assert.ok(langs.has(l), "missing " + l);
+  // OpenSubtitles files are SubRip even though the API says "vtt".
+  assert.ok(s.subtitles.every((x) => x.format === "srt"));
+  // English-speaking Kino: English first.
+  use({ lang: "en-US" });
+  const en = await checked("resolve", "movie:603");
+  assert.equal(en.subtitles[0].lang, "en");
+});
+
+test("resolve one server by name: its own copies, then the other servers", async () => {
+  use();
+  const s = await checked("resolve", "movie:603@super_barbarian");
+  assert.match(s.label, /^Super Barbarian XVI · 4K$/);
+  const copies = s.alternatives.filter((a) => a.url);
+  assert.ok(copies.length >= 1 && copies.every((a) => a.label.startsWith("Super Barbarian XVI")));
+  const refs = s.alternatives.filter((a) => a.ref).map((a) => a.ref);
+  assert.ok(!refs.some((r) => r.endsWith("@super_barbarian")));
+  assert.ok(refs.includes("movie:603@headhunter"));
+  assert.ok(s.alternatives.length <= 8);
+});
+
+test("resolve Bowler: its dubs are not offered as copies of the original", async () => {
+  use();
+  const s = await checked("resolve", "movie:603@bowler");
+  assert.match(s.label, /^Bowler XVIII/);
+  assert.ok(!(s.alternatives || []).some((a) => a.url), "a dub came as a copy");
+});
+
+test("resolve an episode: HLS, with the servers of that episode", async () => {
   use();
   const s = await checked("resolve", "tv:1396:1:1");
   assert.equal(s.mime, "application/vnd.apple.mpegurl");
   assert.ok(s.subtitles.some((x) => x.lang === "es"));
+  assert.ok(s.alternatives.some((a) => a.ref === "tv:1396:1:1@headhunter"));
 });
 
-test("resolve: a title the server does not have is not_found; bad refs too", async () => {
+test("a server that cannot play the title says so in the person's words", async () => {
+  use();
+  await assert.rejects(() => plugin.resolve("movie:603@miner"), (e) => e.code === "rate_limited" && /otro/.test(e.userMessage || ""));
+  await assert.rejects(() => plugin.resolve("tv:1396:1:1@headhunter"), (e) => e.code === "not_found" && /servidor/i.test(e.userMessage || ""));
+});
+
+test("resolve: a title the server does not have is not_found; bad refs and servers too", async () => {
   use();
   await assert.rejects(() => plugin.resolve("movie:999999999"), (e) => e.code === "not_found");
   await assert.rejects(() => plugin.resolve("tv:1396"), (e) => e.code === "not_found");
+  await assert.rejects(() => plugin.resolve("movie:603@nope"), (e) => e.code === "not_found");
   await assert.rejects(() => plugin.resolve("???"), (e) => e.code === "not_found");
 });
